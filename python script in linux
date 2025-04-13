@@ -1,0 +1,376 @@
+import tkinter as tk
+from tkinter import ttk
+from tkinter import messagebox
+from tkinter import scrolledtext
+import re
+import tkinter as tk
+from tkinter import ttk
+from tkinter import messagebox
+from tkinter import scrolledtext
+import re
+from urllib.parse import urlparse
+import ipaddress
+import sys
+SUSPICIOUS_TLDS = {'.zip', '.mov', '.review', '.tk', '.xyz', '.info', '.top', '.club', '.online'}
+SUSPICIOUS_KEYWORDS = {'login', 'signin', 'verify', 'account', 'update', 'secure', 'password', 'banking', 'confirm', 'authenticate', 'admin'} # Added more
+BRAND_KEYWORDS = {'paypal', 'ebay', 'amazon', 'google', 'apple', 'microsoft', 'facebook', 'instagram', 'twitter', 'netflix', 'bank', 'chase', 'wellsfargo', 'linkedin', 'zoom', 'teams', 'vpn'} # Added remote work related
+
+MAX_URL_LENGTH = 90 
+MAX_SUBDOMAINS = 4 
+
+
+def check_ip_address(netloc):
+    """Checks if the netloc is a valid IP address."""
+    try:
+        if netloc: 
+             ipaddress.ip_address(netloc)
+             return True, 15, f"URL uses IP Address ({netloc}) instead of domain name."
+    except ValueError:
+       
+        pass
+    except TypeError:
+        
+        pass
+    return False, 0, ""
+
+
+def check_url_length(url):
+    """Checks if the URL length is suspiciously long."""
+    if len(url) > MAX_URL_LENGTH:
+        return True, 5, f"URL length ({len(url)}) is unusually long (>{MAX_URL_LENGTH})."
+    return False, 0, ""
+
+def check_at_symbol(url):
+    """Checks for the '@' symbol within the URL, potentially indicating credential inclusion trick."""
+   
+    if '://' in url:
+        url_part = url.split('://', 1)[1]
+    else:
+        url_part = url
+
+   
+    first_slash_index = url_part.find('/')
+    at_index = url_part.find('@')
+
+    if at_index != -1:
+        if first_slash_index == -1 or at_index < first_slash_index:
+             
+             query_start = url_part.find('?')
+             if query_start == -1 or at_index < query_start:
+                  return True, 20, "URL contains '@' symbol in authority part, possibly tricking browser."
+    return False, 0, ""
+
+def check_subdomain_count(netloc):
+    """Checks for an excessive number of subdomains."""
+    if not netloc: return False, 0, ""
+    try:
+        ipaddress.ip_address(netloc)
+        return False, 0, "" 
+    except ValueError: pass 
+    except TypeError: return False, 0, "" 
+    parts = netloc.split('.')
+    
+    if len(parts) > 2 and len(parts[-1]) <= 3 and len(parts[-2]) <= 3: 
+        domain_parts = parts[:-2]
+    elif len(parts) > 1:
+         domain_parts = parts[:-1]
+    else:
+         domain_parts = parts
+
+    num_subdomains = len(domain_parts)
+    if num_subdomains > MAX_SUBDOMAINS:
+        return True, 10, f"URL has {num_subdomains} subdomains (>{MAX_SUBDOMAINS}), potentially hiding real domain."
+    return False, 0, ""
+
+def check_https(scheme):
+    """Checks if the URL uses HTTPS."""
+    if scheme is None or scheme.lower() != 'https':
+       
+        if scheme and scheme.lower() == 'http':
+             return True, 5, "URL uses HTTP. While sometimes valid, HTTPS is preferred for safety."
+        else:
+             return True, 10, f"URL uses insecure scheme ('{scheme if scheme else 'None'}') or scheme is missing."
+    return False, 0, ""
+
+def check_suspicious_tld(netloc):
+    """Checks if the Top-Level Domain is in a list of suspicious TLDs."""
+    if not netloc: return False, 0, "" 
+    try:
+        ipaddress.ip_address(netloc)
+        return False, 0, "" 
+    except ValueError: pass 
+    except TypeError: return False, 0, "" 
+
+    parts = netloc.split('.')
+    if len(parts) > 1:
+        tld = "." + parts[-1]
+        if tld.lower() in SUSPICIOUS_TLDS:
+            return True, 8, f"URL uses a TLD ('{tld}') often associated with phishing/spam."
+    return False, 0, ""
+
+def check_keywords(url_lower):
+    """Checks for suspicious keywords often found in phishing URLs."""
+    found_keywords = set()
+    suspicion_score_increase = 0
+    found_brands = set()
+    for keyword in SUSPICIOUS_KEYWORDS:
+        
+        if re.search(r'\b' + re.escape(keyword) + r'\b', url_lower, re.IGNORECASE):
+            found_keywords.add(keyword)
+            suspicion_score_increase += 3
+    for brand in BRAND_KEYWORDS:
+         if re.search(r'\b' + re.escape(brand) + r'\b', url_lower, re.IGNORECASE):
+            found_brands.add(brand)
+            suspicion_score_increase += 5
+    if found_keywords and found_brands:
+         suspicion_score_increase += 5 
+         message = f"URL contains suspicious keywords: {found_keywords} and brand names: {found_brands}."
+         return True, suspicion_score_increase, message
+    elif found_keywords:
+         message = f"URL contains suspicious keywords: {found_keywords}."
+         return True, suspicion_score_increase, message
+    elif found_brands:
+         suspicion_score_increase += 5 
+         message = f"URL contains potential brand impersonation keyword(s): {found_brands}."
+         return True, suspicion_score_increase, message
+    return False, 0, ""
+
+
+def check_punycode(netloc):
+    """Checks if the domain name part uses Punycode (potential IDN Homograph Attack)."""
+    if not netloc: return False, 0, "" 
+
+    
+    try:
+        if isinstance(netloc, str) and 'xn--' in netloc.lower():
+            return True, 15, f"Domain uses Punycode ('{netloc}'). Potential IDN Homograph attack to mimic a legitimate site."
+
+        
+        if isinstance(netloc, str):
+           
+            encoded_netloc = netloc.encode('idna').decode('ascii')
+           
+            if netloc != encoded_netloc and 'xn--' in encoded_netloc:
+                 return True, 15, f"Domain contains characters requiring Punycode ('{encoded_netloc}'). Potential IDN Homograph attack."
+    except (UnicodeError, TypeError, AttributeError) as e:
+         
+         pass
+    except Exception as e:
+        
+        pass
+
+    return False, 0, ""
+
+
+def analyze_url_for_gui(url):
+    """
+    Analyzes the URL using all checks and returns a formatted string report.
+    """
+    findings = []
+    report_lines = []
+    total_score = 0
+    original_url_for_display = url
+
+    report_lines.append(f"--- Analyzing URL: {original_url_for_display} ---")
+
+    
+    scheme = None
+    netloc = None
+    temp_url = url 
+    url_lower = original_url_for_display.lower() 
+    try:
+       
+       
+        if not re.match(r'^[a-zA-Z]+://', temp_url):
+            temp_url = "http://" + temp_url
+            report_lines.append(f"[Info] No scheme found, assuming http:// -> {temp_url}")
+
+       
+       
+        parsed_url = urlparse(temp_url)
+        scheme = parsed_url.scheme
+        netloc = parsed_url.netloc
+        url_lower = temp_url.lower() 
+        
+
+       
+       
+        if not netloc:
+            
+            
+             parsed_original = urlparse(original_url_for_display)
+             netloc = parsed_original.netloc
+             if not netloc:
+                  raise ValueError("Could not parse network location (domain/IP) from URL.")
+             else:
+                  scheme = parsed_original.scheme
+                  url_lower = original_url_for_display.lower() 
+                  
+        report_lines.append(f"Scheme: {scheme if scheme else 'None'}")
+        report_lines.append(f"Netloc: {netloc if netloc else 'None'}")
+        report_lines.append(f"Path: {parsed_url.path if parsed_url else 'None'}") 
+        report_lines.append("\n--- Analysis Results ---")
+
+        
+        checks = [
+            check_ip_address(netloc),
+            check_url_length(temp_url), 
+            check_at_symbol(temp_url),
+            check_subdomain_count(netloc),
+            check_https(scheme),
+            check_suspicious_tld(netloc),
+            check_keywords(url_lower), 
+            check_punycode(netloc) 
+        ]
+
+        
+        for is_suspicious, score, message in checks:
+            if is_suspicious:
+                findings.append(f"[!] {message} (+{score} points)")
+                total_score += score
+
+        if not findings:
+            report_lines.append("[+] No obvious phishing indicators found based on heuristics.")
+        else:
+            report_lines.extend(findings) 
+        report_lines.append(f"\nTotal Suspicion Score: {total_score}")
+
+        
+        if total_score == 0: verdict = "Likely Safe (based on these heuristics)"
+        elif total_score < 15: verdict = "Low Suspicion"
+        elif total_score < 30: verdict = "Medium Suspicion"
+        else: verdict = "High Suspicion - POTENTIALLY PHISHING!"
+
+        report_lines.append(f"Verdict: {verdict}")
+        report_lines.append("-" * 25)
+
+    except ValueError as e:
+        report_lines.append(f"\n[Error] Invalid URL or could not parse: {e}")
+        verdict = "Error During Analysis"
+    except Exception as e:
+        report_lines.append(f"\n[Error] An unexpected error occurred: {e}")
+        verdict = "Error During Analysis" 
+
+   
+    report_lines.append("\nDisclaimer: This tool uses heuristics and is NOT foolproof.")
+    report_lines.append("Always exercise caution.")
+
+    return "\n".join(report_lines) 
+
+
+class PhishingCheckerApp:
+    def __init__(self, master):
+        self.master = master
+        master.title("Enhanced Phishing URL Checker (with Punycode Detection)")
+        master.geometry("650x500") 
+       
+        self.style = ttk.Style()
+        try:
+            
+            available_themes = self.style.theme_names()
+            if 'clam' in available_themes:
+                 self.style.theme_use('clam')
+            elif 'alt' in available_themes:
+                 self.style.theme_use('alt')
+            else:
+                 self.style.theme_use('default') 
+        except tk.TclError:
+             self.style.theme_use('default')
+
+        
+        self.input_frame = ttk.Frame(master, padding="10")
+        self.input_frame.pack(fill=tk.X, padx=5, pady=5) 
+
+        self.url_label = ttk.Label(self.input_frame, text="Enter URL:")
+        self.url_label.pack(side=tk.LEFT, padx=(0, 5)) 
+        self.url_entry = ttk.Entry(self.input_frame, width=60) 
+        self.url_entry.pack(side=tk.LEFT, expand=True, fill=tk.X)
+        self.url_entry.focus() 
+        self.url_entry.bind('<Return>', self.perform_analysis_event)
+
+       
+        self.button_frame = ttk.Frame(master, padding="5")
+        self.button_frame.pack(fill=tk.X, padx=5)
+
+        
+        self.analyze_button = ttk.Button(self.button_frame, text="Analyze URL", command=self.perform_analysis, style="Accent.TButton") 
+        self.analyze_button.pack(side=tk.LEFT, padx=5)
+
+        
+        self.clear_button = ttk.Button(self.button_frame, text="Clear", command=self.clear_fields)
+        self.clear_button.pack(side=tk.LEFT, padx=5)
+
+        
+        self.results_label = ttk.Label(master, text="Analysis Results:", padding="10 0 0 10")
+        self.results_label.pack(anchor=tk.W, padx=5) 
+
+        self.results_text = scrolledtext.ScrolledText(master, wrap=tk.WORD, width=75, height=18, relief=tk.SUNKEN, borderwidth=1, font=("TkDefaultFont", 9)) # Specify font size
+        self.results_text.pack(padx=10, pady=(0,10), fill=tk.BOTH, expand=True) 
+
+       
+        self.results_text.tag_configure("HighRisk", foreground="red", font=("TkDefaultFont", 9, "bold"))
+        self.results_text.tag_configure("MediumRisk", foreground="orange", font=("TkDefaultFont", 9, "bold"))
+        self.results_text.tag_configure("LowRisk", foreground="#E8A117", font=("TkDefaultFont", 9, "bold")) 
+        self.results_text.tag_configure("Safe", foreground="green", font=("TkDefaultFont", 9, "bold"))
+        self.results_text.tag_configure("Error", foreground="magenta", font=("TkDefaultFont", 9, "bold"))
+
+
+    
+    def perform_analysis_event(self, event=None):
+        """Wrapper to call perform_analysis when Enter key is pressed."""
+        self.perform_analysis()
+    def perform_analysis(self):
+        """Gets URL, runs analysis, and displays results in the text area."""
+        url_to_check = self.url_entry.get().strip() 
+        if not url_to_check:
+            messagebox.showwarning("Input Error", "Please enter a URL to analyze.")
+            return
+
+        
+        report = analyze_url_for_gui(url_to_check)
+        
+
+        
+        self.results_text.configure(state='normal') 
+        self.results_text.delete('1.0', tk.END)   
+        self.results_text.insert(tk.END, report)  
+       
+        report_lines = report.splitlines()
+        verdict_line_index = -1
+        for i, line in enumerate(report_lines):
+            if line.startswith("Verdict:"):
+                 verdict_line_index = i
+                 break
+
+        if verdict_line_index != -1:
+             verdict_text = report_lines[verdict_line_index]
+             start_index = f"{verdict_line_index + 1}.0" 
+             end_index = f"{verdict_line_index + 1}.end" 
+             if "High Suspicion" in verdict_text or "POTENTIALLY PHISHING" in verdict_text:
+                 self.results_text.tag_add("HighRisk", start_index, end_index)
+             elif "Medium Suspicion" in verdict_text:
+                 self.results_text.tag_add("MediumRisk", start_index, end_index)
+             elif "Low Suspicion" in verdict_text:
+                 self.results_text.tag_add("LowRisk", start_index, end_index)
+             elif "Likely Safe" in verdict_text:
+                  self.results_text.tag_add("Safe", start_index, end_index)
+             elif "Error During Analysis" in verdict_text:
+                  self.results_text.tag_add("Error", start_index, end_index)
+       
+        self.results_text.configure(state='disabled')
+
+
+    def clear_fields(self):
+        """Clears the URL entry and the results text area."""
+        self.url_entry.delete(0, tk.END)
+        self.results_text.configure(state='normal')
+        self.results_text.delete('1.0', tk.END)
+        self.results_text.configure(state='disabled')
+        self.url_entry.focus()
+
+
+
+if __name__ == "__main__":
+    root = tk.Tk() 
+    app = PhishingCheckerApp(root) 
+    root.mainloop()
